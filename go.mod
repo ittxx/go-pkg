@@ -1,4 +1,4 @@
-module go-skeleton
+module github.com/ittxx/go-pkg
 
 go 1.21
 
