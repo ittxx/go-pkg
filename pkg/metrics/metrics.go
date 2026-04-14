@@ -11,19 +11,23 @@ import (
 
 // Metrics holds core Prometheus metrics (always available)
 type Metrics struct {
-	// HTTP metrics with labels (core metrics)
+	// Application metrics (core metrics)
+	appStartTime      prometheus.Gauge
+	activeConnections *prometheus.GaugeVec
+
+	// Optional modules
+	httpMetrics  *HTTPMetrics     // Optional HTTP metrics
+	dbMetrics    *DatabaseMetrics // Optional database metrics
+	customMetrics map[string]interface{} // Custom metrics
+	registry    *prometheus.Registry // Custom registry
+}
+
+// HTTPMetrics holds HTTP-specific metrics (optional)
+type HTTPMetrics struct {
 	httpRequestsTotal    *prometheus.CounterVec
 	httpRequestDuration  *prometheus.HistogramVec
 	httpResponseSize     *prometheus.HistogramVec
 	httpRequestsInFlight *prometheus.GaugeVec
-
-	// Application metrics (core metrics)
-	appStartTime      *prometheus.Gauge
-	activeConnections *prometheus.GaugeVec
-
-	// Optional modules
-	dbMetrics   *DatabaseMetrics   // Optional database metrics
-	customMetrics map[string]interface{} // Custom metrics
 }
 
 // DatabaseMetrics holds database-specific metrics (optional)
@@ -35,55 +39,84 @@ type DatabaseMetrics struct {
 	dbConnectionErrors *prometheus.CounterVec
 }
 
-// NewMetrics creates a new core Metrics instance (without database metrics)
+// NewMetrics creates a new core Metrics instance (basic metrics only)
 func NewMetrics() *Metrics {
+	// Create a new registry for this instance to avoid conflicts
+	registry := prometheus.NewRegistry()
+	
+	// Create metrics
+	appStartTime := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "app_start_time_unix",
+		Help: "Application start time (Unix timestamp)",
+	})
+	
+	activeConnections := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "active_connections_total",
+			Help: "Number of active connections",
+		},
+		[]string{"type"}, // websocket, http, etc.
+	)
+	
+	// Register metrics
+	registry.MustRegister(appStartTime)
+	registry.MustRegister(activeConnections)
+	
 	return &Metrics{
-		// HTTP metrics with labels
-		httpRequestsTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "http_requests_total",
-				Help: "Total number of HTTP requests",
-			},
-			[]string{"method", "endpoint", "status_code"},
-		),
-		httpRequestDuration: promauto.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "http_request_duration_seconds",
-				Help:    "HTTP request duration in seconds",
-				Buckets: prometheus.DefBuckets,
-			},
-			[]string{"method", "endpoint"},
-		),
-		httpResponseSize: promauto.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "http_response_size_bytes",
-				Help:    "HTTP response size in bytes",
-				Buckets: []float64{100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000},
-			},
-			[]string{"method", "endpoint"},
-		),
-		httpRequestsInFlight: promauto.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "http_requests_in_flight",
-				Help: "Number of currently active HTTP requests",
-			},
-			[]string{"method"},
-		),
-
-		// Application metrics
-		appStartTime: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "app_start_time_unix",
-			Help: "Application start time (Unix timestamp)",
-		}),
-		activeConnections: promauto.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "active_connections_total",
-				Help: "Number of active connections",
-			},
-			[]string{"type"}, // websocket, http, etc.
-		),
-		customMetrics: make(map[string]interface{}),
+		appStartTime:      appStartTime,
+		activeConnections: activeConnections,
+		customMetrics:     make(map[string]interface{}),
+		registry:          registry,
 	}
+}
+
+// WithHTTPMetrics enables HTTP metrics module
+func (m *Metrics) WithHTTPMetrics() *Metrics {
+	if m.httpMetrics == nil {
+		m.httpMetrics = &HTTPMetrics{
+			httpRequestsTotal: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "http_requests_total",
+					Help: "Total number of HTTP requests",
+				},
+				[]string{"method", "endpoint", "status_code"},
+			),
+			httpRequestDuration: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Name:    "http_request_duration_seconds",
+					Help:    "HTTP request duration in seconds",
+					Buckets: prometheus.DefBuckets,
+				},
+				[]string{"method", "endpoint"},
+			),
+			httpResponseSize: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Name:    "http_response_size_bytes",
+					Help:    "HTTP response size in bytes",
+					Buckets: []float64{100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000},
+				},
+				[]string{"method", "endpoint"},
+			),
+			httpRequestsInFlight: promauto.NewGaugeVec(
+				prometheus.GaugeOpts{
+					Name: "http_requests_in_flight",
+					Help: "Number of currently active HTTP requests",
+				},
+				[]string{"method"},
+			),
+		}
+	}
+	return m
+}
+
+// GetHTTPMetrics returns HTTP metrics module (nil if not enabled)
+func (m *Metrics) GetHTTPMetrics() *HTTPMetrics {
+	return m.httpMetrics
+}
+
+// HasHTTPMetrics checks if HTTP metrics are enabled
+func (m *Metrics) HasHTTPMetrics() bool {
+	return m.httpMetrics != nil
 }
 
 // WithDatabaseMetrics enables database metrics module
@@ -142,6 +175,9 @@ func (m *Metrics) Init() {
 
 // Handler returns the Prometheus metrics HTTP handler
 func (m *Metrics) Handler() http.Handler {
+	if m.registry != nil {
+		return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+	}
 	return promhttp.Handler()
 }
 
@@ -151,24 +187,32 @@ func (m *Metrics) Handler() http.Handler {
 
 // RecordHTTPRequest records HTTP request metrics
 func (m *Metrics) RecordHTTPRequest(method, endpoint string, statusCode int, duration float64) {
-	m.httpRequestsTotal.WithLabelValues(method, endpoint, formatStatusCode(statusCode)).Inc()
-	m.httpRequestDuration.WithLabelValues(method, endpoint).Observe(duration)
-	m.httpRequestsInFlight.WithLabelValues(method).Dec() // Decrement when request completes
+	if m.httpMetrics != nil {
+		m.httpMetrics.httpRequestsTotal.WithLabelValues(method, endpoint, formatStatusCode(statusCode)).Inc()
+		m.httpMetrics.httpRequestDuration.WithLabelValues(method, endpoint).Observe(duration)
+		m.httpMetrics.httpRequestsInFlight.WithLabelValues(method).Dec() // Decrement when request completes
+	}
 }
 
 // IncRequests increments HTTP request counter (for start of request)
 func (m *Metrics) IncRequests(method, endpoint string) {
-	m.httpRequestsInFlight.WithLabelValues(method).Inc()
+	if m.httpMetrics != nil {
+		m.httpMetrics.httpRequestsInFlight.WithLabelValues(method).Inc()
+	}
 }
 
 // ObserveDuration observes HTTP request duration
 func (m *Metrics) ObserveDuration(method, endpoint string, duration float64) {
-	m.httpRequestDuration.WithLabelValues(method, endpoint).Observe(duration)
+	if m.httpMetrics != nil {
+		m.httpMetrics.httpRequestDuration.WithLabelValues(method, endpoint).Observe(duration)
+	}
 }
 
 // ObserveResponseSize observes HTTP response size
 func (m *Metrics) ObserveResponseSize(method, endpoint string, size float64) {
-	m.httpResponseSize.WithLabelValues(method, endpoint).Observe(size)
+	if m.httpMetrics != nil {
+		m.httpMetrics.httpResponseSize.WithLabelValues(method, endpoint).Observe(size)
+	}
 }
 
 // =====================================
@@ -353,14 +397,14 @@ func HealthCheckMiddleware(healthCheck func() error) func(http.Handler) http.Han
 // Convenience functions for different use cases
 // =====================================
 
-// NewHTTPMetrics creates metrics instance with only HTTP metrics (no database)
+// NewHTTPMetrics creates metrics instance with HTTP metrics enabled
 func NewHTTPMetrics() *Metrics {
-	return NewMetrics() // By default, no database metrics
+	return NewMetrics().WithHTTPMetrics()
 }
 
 // NewFullMetrics creates metrics instance with both HTTP and database metrics
 func NewFullMetrics() *Metrics {
-	return NewMetrics().WithDatabaseMetrics()
+	return NewMetrics().WithHTTPMetrics().WithDatabaseMetrics()
 }
 
 // =====================================
@@ -370,7 +414,7 @@ func NewFullMetrics() *Metrics {
 var DefaultMetrics *Metrics
 
 func init() {
-	DefaultMetrics = NewHTTPMetrics() // Default to HTTP-only metrics
+	DefaultMetrics = NewMetrics() // Default to basic metrics only
 }
 
 // InitDefaultMetrics initializes default metrics
