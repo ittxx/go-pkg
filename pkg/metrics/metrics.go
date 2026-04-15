@@ -193,6 +193,16 @@ func (m *Metrics) HasDatabaseMetrics() bool {
 // Init initializes metrics with current timestamp
 func (m *Metrics) Init() {
 	m.appStartTime.SetToCurrentTime()
+	
+	// Register standard Go runtime metrics if using default registry
+	if m.registry == nil {
+		prometheus.MustRegister(prometheus.NewGoCollector())
+		prometheus.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	} else {
+		// Register in instance registry
+		m.registry.MustRegister(prometheus.NewGoCollector())
+		m.registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	}
 }
 
 // Handler returns the Prometheus metrics HTTP handler
