@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -73,37 +72,49 @@ func NewMetrics() *Metrics {
 // WithHTTPMetrics enables HTTP metrics module
 func (m *Metrics) WithHTTPMetrics() *Metrics {
 	if m.httpMetrics == nil {
+		httpRequestsTotal := prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "http_requests_total",
+				Help: "Total number of HTTP requests",
+			},
+			[]string{"method", "endpoint", "status_code"},
+		)
+		httpRequestDuration := prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "http_request_duration_seconds",
+				Help:    "HTTP request duration in seconds",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{"method", "endpoint"},
+		)
+		httpResponseSize := prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "http_response_size_bytes",
+				Help:    "HTTP response size in bytes",
+				Buckets: []float64{100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000},
+			},
+			[]string{"method", "endpoint"},
+		)
+		httpRequestsInFlight := prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "http_requests_in_flight",
+				Help: "Number of currently active HTTP requests",
+			},
+			[]string{"method"},
+		)
+
+		// Register metrics in the instance registry (fallback to default registry if nil)
+		if m.registry != nil {
+			m.registry.MustRegister(httpRequestsTotal, httpRequestDuration, httpResponseSize, httpRequestsInFlight)
+		} else {
+			prometheus.MustRegister(httpRequestsTotal, httpRequestDuration, httpResponseSize, httpRequestsInFlight)
+		}
+
 		m.httpMetrics = &HTTPMetrics{
-			httpRequestsTotal: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Name: "http_requests_total",
-					Help: "Total number of HTTP requests",
-				},
-				[]string{"method", "endpoint", "status_code"},
-			),
-			httpRequestDuration: promauto.NewHistogramVec(
-				prometheus.HistogramOpts{
-					Name:    "http_request_duration_seconds",
-					Help:    "HTTP request duration in seconds",
-					Buckets: prometheus.DefBuckets,
-				},
-				[]string{"method", "endpoint"},
-			),
-			httpResponseSize: promauto.NewHistogramVec(
-				prometheus.HistogramOpts{
-					Name:    "http_response_size_bytes",
-					Help:    "HTTP response size in bytes",
-					Buckets: []float64{100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000},
-				},
-				[]string{"method", "endpoint"},
-			),
-			httpRequestsInFlight: promauto.NewGaugeVec(
-				prometheus.GaugeOpts{
-					Name: "http_requests_in_flight",
-					Help: "Number of currently active HTTP requests",
-				},
-				[]string{"method"},
-			),
+			httpRequestsTotal:    httpRequestsTotal,
+			httpRequestDuration:  httpRequestDuration,
+			httpResponseSize:     httpResponseSize,
+			httpRequestsInFlight: httpRequestsInFlight,
 		}
 	}
 	return m
@@ -122,37 +133,48 @@ func (m *Metrics) HasHTTPMetrics() bool {
 // WithDatabaseMetrics enables database metrics module
 func (m *Metrics) WithDatabaseMetrics() *Metrics {
 	if m.dbMetrics == nil {
+		dbConnections := prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "db_connections",
+				Help: "Database connection pool metrics",
+			},
+			[]string{"state"}, // max, active, idle, in_use, open
+		)
+		dbQueriesTotal := prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "db_queries_total",
+				Help: "Total number of database queries",
+			},
+			[]string{"operation", "table", "status"}, // select, insert, update, delete, success, error
+		)
+		dbQueryDuration := prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "db_query_duration_seconds",
+				Help:    "Database query duration in seconds",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{"operation", "table"},
+		)
+		dbConnectionErrors := prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "db_connection_errors_total",
+				Help: "Total number of database connection errors",
+			},
+			[]string{"error_type"}, // timeout, connection_refused, etc.
+		)
+
+		// Register metrics in the instance registry (fallback to default registry if nil)
+		if m.registry != nil {
+			m.registry.MustRegister(dbConnections, dbQueriesTotal, dbQueryDuration, dbConnectionErrors)
+		} else {
+			prometheus.MustRegister(dbConnections, dbQueriesTotal, dbQueryDuration, dbConnectionErrors)
+		}
+
 		m.dbMetrics = &DatabaseMetrics{
-			// Database metrics with labels
-			dbConnections: promauto.NewGaugeVec(
-				prometheus.GaugeOpts{
-					Name: "db_connections",
-					Help: "Database connection pool metrics",
-				},
-				[]string{"state"}, // max, active, idle, in_use, open
-			),
-			dbQueriesTotal: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Name: "db_queries_total",
-					Help: "Total number of database queries",
-				},
-				[]string{"operation", "table", "status"}, // select, insert, update, delete, success, error
-			),
-			dbQueryDuration: promauto.NewHistogramVec(
-				prometheus.HistogramOpts{
-					Name:    "db_query_duration_seconds",
-					Help:    "Database query duration in seconds",
-					Buckets: prometheus.DefBuckets,
-				},
-				[]string{"operation", "table"},
-			),
-			dbConnectionErrors: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Name: "db_connection_errors_total",
-					Help: "Total number of database connection errors",
-				},
-				[]string{"error_type"}, // timeout, connection_refused, etc.
-			),
+			dbConnections:      dbConnections,
+			dbQueriesTotal:     dbQueriesTotal,
+			dbQueryDuration:    dbQueryDuration,
+			dbConnectionErrors: dbConnectionErrors,
 		}
 	}
 	return m

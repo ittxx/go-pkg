@@ -24,8 +24,8 @@ type Config struct {
 	Format      string `json:"format" yaml:"format"` // "json" or "text"
 	ServiceName string `json:"service_name" yaml:"service_name"`
 	Environment string `json:"environment" yaml:"environment"` // "dev", "staging", "prod"
-	AddSource   bool   `json:"add_source" yaml:"add_source"`   // добавить source:file:line
-}
+	AddSource   bool   `json:"add_source" yaml:"add_source"`   // add source:file:line
+	}
 
 // DefaultConfig returns default logger configuration
 func DefaultConfig() Config {

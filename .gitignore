@@ -79,3 +79,4 @@ uploads/
 cache/
 examples/
 Makefile
+docs/*

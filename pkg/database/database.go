@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"go-skeleton/pkg/config"
-	"go-skeleton/pkg/logger"
-	"go-skeleton/pkg/metrics"
+	"github.com/ittxx/go-pkg/pkg/config"
+	"github.com/ittxx/go-pkg/pkg/logger"
+	"github.com/ittxx/go-pkg/pkg/metrics"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,7 +52,7 @@ type Config struct {
 }
 
 // NewPostgreSQL creates a new PostgreSQL connection using pgxpool
-func NewPostgreSQL(ctx context.Context, cfg *config.DatabaseConfig, log *logger.Logger, m *metrics.Metrics) (*PostgreSQL, error) {
+func NewPostgreSQL(ctx context.Context, cfg *config.DatabaseConfig, logger *logger.Logger, m *metrics.Metrics) (*PostgreSQL, error) {
 	// Build connection string
 	connStr := fmt.Sprintf(
 		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
@@ -67,7 +67,7 @@ func NewPostgreSQL(ctx context.Context, cfg *config.DatabaseConfig, log *logger.
 	// Create pool configuration
 	poolConfig, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
-		log.WithComponent("database").Error("ошибка парсинга конфигурации БД", err, "connStr", connStr)
+		logger.WithComponent("database").WithError(err).Error("failed to parse db pool config", "connStr", connStr)
 		return nil, err
 	}
 
@@ -80,13 +80,13 @@ func NewPostgreSQL(ctx context.Context, cfg *config.DatabaseConfig, log *logger.
 	// Create pool
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
-		log.WithComponent("database").Error("ошибка создания пула соединений БД", err)
+		logger.WithComponent("database").WithError(err).Error("failed to create db pool")
 		return nil, err
 	}
 
 	// Test connection
 	if err := pool.Ping(ctx); err != nil {
-		log.WithComponent("database").Error("ошибка пинга БД", err)
+		logger.WithComponent("database").WithError(err).Error("failed to ping db")
 		pool.Close()
 		return nil, err
 	}
@@ -94,23 +94,23 @@ func NewPostgreSQL(ctx context.Context, cfg *config.DatabaseConfig, log *logger.
 	db := &PostgreSQL{
 		pool:    pool,
 		config:  cfg,
-		logger:  log,
+		logger:  logger,
 		metrics: m,
 	}
 
-	log.WithComponent("database").Info("пул соединений БД создан",
+	logger.WithComponent("database").Info("database pool created",
 		"host", cfg.Host,
 		"port", cfg.Port,
 		"database", cfg.Database,
-		"maxConns", cfg.MaxConns,
-		"minConns", cfg.MinConns,
+		"max_conns", cfg.MaxConns,
+		"min_conns", cfg.MinConns,
 	)
 
 	return db, nil
 }
 
 // NewSQLDatabase creates a new database connection using sql.DB
-func NewSQLDatabase(cfg Config, m *metrics.Metrics, log *logger.Logger) (*SQLDatabase, error) {
+func NewSQLDatabase(cfg Config, m *metrics.Metrics, logger *logger.Logger) (*SQLDatabase, error) {
 	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Host,
 		cfg.Port,
@@ -140,10 +140,10 @@ func NewSQLDatabase(cfg Config, m *metrics.Metrics, log *logger.Logger) (*SQLDat
 
 	// Start metrics monitoring if metrics is available
 	if m != nil {
-		go monitorConnectionPool(db, m, log)
+		go monitorConnectionPool(db, m, logger)
 	}
 
-	log.WithComponent("database").Info("Database connected successfully",
+	logger.WithComponent("database").Info("Database connected successfully",
 		"host", cfg.Host,
 		"port", cfg.Port,
 		"database", cfg.Name,
@@ -164,7 +164,7 @@ func NewSQLDatabase(cfg Config, m *metrics.Metrics, log *logger.Logger) (*SQLDat
 			MinConns:    int32(cfg.MaxIdleConns),
 			MaxIdleTime: time.Duration(cfg.ConnMaxLifetime) * time.Minute,
 		},
-		logger:  log,
+		logger:  logger,
 		metrics: m,
 	}, nil
 }
@@ -199,7 +199,7 @@ func (db *PostgreSQL) UpdateMetrics() {
 // Close closes the database pool
 func (db *PostgreSQL) Close() error {
 	db.pool.Close()
-	db.logger.WithComponent("database").Info("пул соединений БД закрыт")
+	db.logger.WithComponent("database").Info("database pool closed")
 	return nil
 }
 
@@ -216,8 +216,8 @@ func (db *PostgreSQL) StartConnectionMonitor(ctx context.Context, interval time.
 			case <-ticker.C:
 				db.UpdateMetrics()
 				stats := db.GetStats()
-				if stats.AcquiredConns() > db.config.MaxConns {
-					db.logger.WithComponent("database").Warn("пул соединений БД близко к лимиту",
+					if stats.AcquiredConns() > db.config.MaxConns {
+					db.logger.WithComponent("database").Warn("database pool nearing connection limit",
 						"acquired", stats.AcquiredConns(),
 						"max", db.config.MaxConns,
 					)
@@ -250,8 +250,8 @@ func (db *SQLDatabase) Health(ctx context.Context) error {
 	return nil
 }
 
-// GetStats returns database statistics
-func (db *SQLDatabase) GetStats() sql.DBStats {
+ // GetStats returns database statistics
+func (db *SQLDatabase) GetStats() interface{} {
 	if db.db == nil {
 		return sql.DBStats{}
 	}
@@ -262,10 +262,10 @@ func (db *SQLDatabase) GetStats() sql.DBStats {
 func (db *SQLDatabase) Close() error {
 	if db.db != nil {
 		if err := db.db.Close(); err != nil {
-			db.logger.WithComponent("database").WithError(err).Error("Failed to close database")
+			db.logger.WithComponent("database").WithError(err).Error("failed to close database")
 			return fmt.Errorf("failed to close database: %w", err)
 		}
-		db.logger.WithComponent("database").Info("Database connection closed")
+		db.logger.WithComponent("database").Info("database connection closed")
 	}
 	return nil
 }
@@ -311,12 +311,12 @@ func HealthCheck(db Database) error {
 func Close(db Database, logger *logger.Logger) error {
 	if err := db.Close(); err != nil {
 		if logger != nil {
-			logger.WithComponent("database").WithError(err).Error("Failed to close database")
+			logger.WithComponent("database").WithError(err).Error("failed to close database")
 		}
 		return fmt.Errorf("failed to close database: %w", err)
 	}
 	if logger != nil {
-		logger.WithComponent("database").Info("Database connection closed")
+		logger.WithComponent("database").Info("database connection closed")
 	}
 	return nil
 }

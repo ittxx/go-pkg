@@ -7,11 +7,45 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ittxx/go-pkg/pkg/logger"
 )
 
 // Source represents a configuration source
 type Source interface {
 	Load() (map[string]interface{}, error)
+}
+
+// DatabaseConfig is a convenience struct describing DB connection options.
+// It's used by other packages (e.g., database) to avoid duplicating DB config types.
+type DatabaseConfig struct {
+	Host        string        `yaml:"host" env:"DB_HOST"`
+	Port        int           `yaml:"port" env:"DB_PORT"`
+	User        string        `yaml:"user" env:"DB_USER"`
+	Password    string        `yaml:"password" env:"DB_PASSWORD"`
+	Database    string        `yaml:"database" env:"DB_NAME"`
+	SSLMode     string        `yaml:"ssl_mode" env:"DB_SSL_MODE"`
+	MaxConns    int32         `yaml:"max_conns" env:"DB_MAX_CONNS"`
+	MinConns    int32         `yaml:"min_conns" env:"DB_MIN_CONNS"`
+	MaxIdleTime time.Duration `yaml:"max_idle_time" env:"DB_MAX_IDLE_TIME"`
+}
+
+// Config is a convenience application configuration structure used by examples.
+// It aggregates logging, server, metrics and database sections.
+type Config struct {
+	Logging logger.Config   `yaml:"logging"`
+	Metrics struct {
+		Enabled bool `yaml:"enabled"`
+		Port    int  `yaml:"port"`
+	} `yaml:"metrics"`
+	Server struct {
+		Host         string        `yaml:"host"`
+		Port         int           `yaml:"port"`
+		ReadTimeout  time.Duration `yaml:"read_timeout"`
+		WriteTimeout time.Duration `yaml:"write_timeout"`
+		IdleTimeout  time.Duration `yaml:"idle_timeout"`
+	} `yaml:"server"`
+	Database DatabaseConfig `yaml:"database"`
 }
 
 // ConfigManager manages configuration from multiple sources
@@ -26,9 +60,8 @@ func New() *ConfigManager {
 	}
 }
 
-// AddSource adds a configuration source
-func (cm *ConfigManager) AddSource(source Source) *ConfigManager {
-	cm.sources = append(cm.sources, source)
+func (cm *ConfigManager) AddSource(sources ...Source) *ConfigManager {
+	cm.sources = append(cm.sources, sources...)
 	return cm
 }
 
@@ -90,50 +123,50 @@ func mergeStruct(v reflect.Value, source map[string]interface{}, prefix string) 
 			continue
 		}
 
-		// Handle nested structs
-		if field.Kind() == reflect.Struct {
-			// Special handling for time.Duration
-			if field.Type() == reflect.TypeOf(time.Duration(0)) {
-				// Build the struct name prefix for flattened keys
-				fieldPrefix := ""
-				if prefix != "" {
-					fieldPrefix = prefix + strings.Title(fieldType.Name)
-				} else {
-					fieldPrefix = strings.Title(fieldType.Name)
-				}
-
-				// Try to find value in source
-				var possibleKeys []string
-				possibleKeys = append(possibleKeys, fieldPrefix)
-				
-				// Try yaml tag
-				if yamlTag := fieldType.Tag.Get("yaml"); yamlTag != "" && yamlTag != "-" {
-					if prefix != "" {
-						possibleKeys = append(possibleKeys, prefix+strings.Title(yamlTag))
-					} else {
-						possibleKeys = append(possibleKeys, strings.Title(yamlTag))
-					}
-				}
-
-				// Look for value in source
-				var foundValue interface{}
-				var found bool
-				for _, key := range possibleKeys {
-					if value, exists := source[key]; exists {
-						foundValue = value
-						found = true
-						break
-					}
-				}
-
-				if found {
-					if err := setDurationValue(field, foundValue); err != nil {
-						return fmt.Errorf("failed to set duration field %s: %w", fieldType.Name, err)
-					}
-				}
-				continue
+		// Special handling for time.Duration (time.Duration has Kind Int64, not Struct)
+		if field.Type() == reflect.TypeOf(time.Duration(0)) {
+			// Build the struct name prefix for flattened keys
+			fieldPrefix := ""
+			if prefix != "" {
+				fieldPrefix = prefix + strings.Title(fieldType.Name)
+			} else {
+				fieldPrefix = strings.Title(fieldType.Name)
 			}
 
+			// Try to find value in source
+			var possibleKeys []string
+			possibleKeys = append(possibleKeys, fieldPrefix)
+
+			// Try yaml tag
+			if yamlTag := fieldType.Tag.Get("yaml"); yamlTag != "" && yamlTag != "-" {
+				if prefix != "" {
+					possibleKeys = append(possibleKeys, prefix+strings.Title(yamlTag))
+				} else {
+					possibleKeys = append(possibleKeys, strings.Title(yamlTag))
+				}
+			}
+
+			// Look for value in source
+			var foundValue interface{}
+			var found bool
+			for _, key := range possibleKeys {
+				if value, exists := source[key]; exists {
+					foundValue = value
+					found = true
+					break
+				}
+			}
+
+			if found {
+				if err := setDurationValue(field, foundValue); err != nil {
+					return fmt.Errorf("failed to set duration field %s: %w", fieldType.Name, err)
+				}
+			}
+			continue
+		}
+
+		// Handle nested structs
+		if field.Kind() == reflect.Struct {
 			// Build the struct name prefix for flattened keys
 			structPrefix := ""
 			if prefix != "" {
