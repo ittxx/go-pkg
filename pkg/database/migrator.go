@@ -469,12 +469,14 @@ func RunDirectoryMigrations(ctx context.Context, db *SQLDatabase, migrationsDir 
 		start := time.Now()
 		logger.WithComponent("migrator").Info("running migration", "file", name)
 
-		start := time.Now()
-		_, err := tx.ExecContext(ctx, upSQL)
-		duration := time.Since(start).Seconds()
+		_, err = tx.ExecContext(ctx, upSQL)
+		// Use a single time measurement variable and derive both seconds for metrics
+		// and a time.Duration for logging to avoid shadowing and type errors.
+		dur := time.Since(start)
+		seconds := dur.Seconds()
 		// Record metric for running migration file
 		if metrics.DefaultMetrics != nil {
-			metrics.DefaultMetrics.RecordDBQuery("migration_file", name, duration, err)
+			metrics.DefaultMetrics.RecordDBQuery("migration_file", name, seconds, err)
 		}
 		if err != nil {
 			_ = tx.Rollback()
@@ -487,8 +489,7 @@ func RunDirectoryMigrations(ctx context.Context, db *SQLDatabase, migrationsDir 
 			return fmt.Errorf("failed to commit migration %s: %w", name, err)
 		}
 
-		duration := time.Since(start)
-		logger.WithComponent("migrator").Info("migration applied", "file", name, "duration", duration.String())
+		logger.WithComponent("migrator").Info("migration applied", "file", name, "duration", dur.String())
 	}
 
 	return nil
