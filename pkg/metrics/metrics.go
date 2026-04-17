@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,6 +20,10 @@ type Metrics struct {
 	dbMetrics    *DatabaseMetrics // Optional database metrics
 	customMetrics map[string]interface{} // Custom metrics
 	registry    *prometheus.Registry // Custom registry
+
+	// ExcludedPaths contains endpoints that should not be instrumented.
+	// Defaults include common technical endpoints such as /metrics and /health.
+	excludedPaths []string
 }
 
 // HTTPMetrics holds HTTP-specific metrics (optional)
@@ -66,6 +71,8 @@ func NewMetrics() *Metrics {
 		activeConnections: activeConnections,
 		customMetrics:     make(map[string]interface{}),
 		registry:          registry,
+		// sensible defaults to avoid collecting metrics for technical endpoints
+		excludedPaths: []string{"/metrics", "/health", "/favicon.ico"},
 	}
 }
 
@@ -219,18 +226,23 @@ func (m *Metrics) Handler() http.Handler {
 
 // RecordHTTPRequest records HTTP request metrics
 func (m *Metrics) RecordHTTPRequest(method, endpoint string, statusCode int, duration float64) {
-	if m.httpMetrics != nil {
-		m.httpMetrics.httpRequestsTotal.WithLabelValues(method, endpoint, formatStatusCode(statusCode)).Inc()
-		m.httpMetrics.httpRequestDuration.WithLabelValues(method, endpoint).Observe(duration)
-		m.httpMetrics.httpRequestsInFlight.WithLabelValues(method).Dec() // Decrement when request completes
+	// Skip recording if HTTP metrics aren't enabled or endpoint is excluded
+	if m.httpMetrics == nil || m.isEndpointExcluded(endpoint) {
+		return
 	}
+
+	m.httpMetrics.httpRequestsTotal.WithLabelValues(method, endpoint, formatStatusCode(statusCode)).Inc()
+	m.httpMetrics.httpRequestDuration.WithLabelValues(method, endpoint).Observe(duration)
+	m.httpMetrics.httpRequestsInFlight.WithLabelValues(method).Dec() // Decrement when request completes
 }
 
 // IncRequests increments HTTP request counter (for start of request)
 func (m *Metrics) IncRequests(method, endpoint string) {
-	if m.httpMetrics != nil {
-		m.httpMetrics.httpRequestsInFlight.WithLabelValues(method).Inc()
+	// Skip increment if HTTP metrics aren't enabled or endpoint is excluded
+	if m.httpMetrics == nil || m.isEndpointExcluded(endpoint) {
+		return
 	}
+	m.httpMetrics.httpRequestsInFlight.WithLabelValues(method).Inc()
 }
 
 // ObserveDuration observes HTTP request duration
@@ -361,14 +373,48 @@ func formatStatusCode(statusCode int) string {
 	}
 }
 
+// isEndpointExcluded checks if the provided endpoint matches any configured excluded path.
+// It treats an excluded path as matching either exact equality or as a prefix (e.g. "/metrics" matches "/metrics" and "/metrics/anything").
+func (m *Metrics) isEndpointExcluded(endpoint string) bool {
+	if m == nil {
+		return false
+	}
+	for _, p := range m.excludedPaths {
+		if p == "" {
+			continue
+		}
+		if endpoint == p || strings.HasPrefix(endpoint, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// SetExcludedPaths replaces the excluded paths for this Metrics instance.
+func (m *Metrics) SetExcludedPaths(paths []string) {
+	if m == nil {
+		return
+	}
+	m.excludedPaths = append([]string{}, paths...)
+}
+
 // =====================================
 // Middleware helper functions
 // =====================================
 
-// MetricsMiddleware creates HTTP middleware for metrics collection
+ // MetricsMiddleware creates HTTP middleware for metrics collection
 func MetricsMiddleware(m *Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip instrumentation for known technical endpoints to avoid high-cardinality
+			// and internal noise (Prometheus scrapes, health checks, favicon, etc.).
+			// If you add more technical endpoints, include them here or make this configurable.
+			if r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/metrics/") ||
+				r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			start := time.Now()
 
 			// Increment request counter

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ittxx/go-pkg/pkg/logger"
+	"github.com/ittxx/go-pkg/pkg/metrics"
 )
 
 // Migration represents a single migration
@@ -89,14 +90,26 @@ func (m *Migrator) createMigrationsTable(ctx context.Context) error {
 		)
 	`, m.tableName)
 
+	start := time.Now()
 	_, err := m.db.ExecContext(ctx, query)
+	duration := time.Since(start).Seconds()
+	// Record query metric for migrations table creation
+	if metrics.DefaultMetrics != nil {
+		metrics.DefaultMetrics.RecordDBQuery("create_table", "schema_migrations", duration, err)
+	}
 	return err
 }
 
 // getAppliedMigrations returns a map of applied migration versions
 func (m *Migrator) getAppliedMigrations(ctx context.Context) (map[string]bool, error) {
 	query := fmt.Sprintf("SELECT version FROM %s", m.tableName)
+	start := time.Now()
 	rows, err := m.db.QueryContext(ctx, query)
+	duration := time.Since(start).Seconds()
+	// Record query metric for reading applied migrations
+	if metrics.DefaultMetrics != nil {
+		metrics.DefaultMetrics.RecordDBQuery("select", "schema_migrations", duration, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +170,12 @@ func (m *Migrator) executeMigration(ctx context.Context, migration Migration) er
 		VALUES ($1, $2, $3)
 	`, m.tableName)
 
+	startRec := time.Now()
 	_, err = tx.ExecContext(ctx, query, migration.Version(), migration.Description(), time.Now())
+	durationRec := time.Since(startRec).Seconds()
+	if metrics.DefaultMetrics != nil {
+		metrics.DefaultMetrics.RecordDBQuery("insert", "schema_migrations", durationRec, err)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to record migration: %w", err)
 	}
@@ -302,7 +320,13 @@ func (m *SQLMigration) Up(ctx context.Context, tx *sql.Tx) error {
 	if m.upSQL == "" {
 		return nil
 	}
+	start := time.Now()
 	_, err := tx.ExecContext(ctx, m.upSQL)
+	duration := time.Since(start).Seconds()
+	// Record migration query (up)
+	if metrics.DefaultMetrics != nil {
+		metrics.DefaultMetrics.RecordDBQuery("migration_up", "sql_migration", duration, err)
+	}
 	return err
 }
 
@@ -311,7 +335,13 @@ func (m *SQLMigration) Down(ctx context.Context, tx *sql.Tx) error {
 	if m.downSQL == "" {
 		return nil
 	}
+	start := time.Now()
 	_, err := tx.ExecContext(ctx, m.downSQL)
+	duration := time.Since(start).Seconds()
+	// Record migration query (down)
+	if metrics.DefaultMetrics != nil {
+		metrics.DefaultMetrics.RecordDBQuery("migration_down", "sql_migration", duration, err)
+	}
 	return err
 }
 
@@ -439,7 +469,14 @@ func RunDirectoryMigrations(ctx context.Context, db *SQLDatabase, migrationsDir 
 		start := time.Now()
 		logger.WithComponent("migrator").Info("running migration", "file", name)
 
-		if _, err := tx.ExecContext(ctx, upSQL); err != nil {
+		start := time.Now()
+		_, err := tx.ExecContext(ctx, upSQL)
+		duration := time.Since(start).Seconds()
+		// Record metric for running migration file
+		if metrics.DefaultMetrics != nil {
+			metrics.DefaultMetrics.RecordDBQuery("migration_file", name, duration, err)
+		}
+		if err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("migration %s failed: %w", name, err)
 		}

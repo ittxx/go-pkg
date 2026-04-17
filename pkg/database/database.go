@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ittxx/go-pkg/pkg/config"
@@ -51,6 +52,39 @@ type Config struct {
 	UsePool         bool // use pgxpool vs sql.DB
 }
 
+// NewSQLDatabaseFromExisting wraps an existing *sql.DB with the SQLDatabase adapter
+// so caller code can use the instrumented Exec/Query wrappers without reopening the connection.
+// It will start the connection pool monitor if metrics are provided.
+func NewSQLDatabaseFromExisting(db *sql.DB, cfg Config, m *metrics.Metrics, logger *logger.Logger) (*SQLDatabase, error) {
+	if db == nil {
+		return nil, fmt.Errorf("provided *sql.DB is nil")
+	}
+
+	wrapped := &SQLDatabase{
+		db:     db,
+		config: &config.DatabaseConfig{
+			Host:        cfg.Host,
+			Port:        cfg.Port,
+			User:        cfg.User,
+			Password:    cfg.Password,
+			Database:    cfg.Name,
+			SSLMode:     cfg.SSLMode,
+			MaxConns:    int32(cfg.MaxOpenConns),
+			MinConns:    int32(cfg.MaxIdleConns),
+			MaxIdleTime: time.Duration(cfg.ConnMaxLifetime) * time.Minute,
+		},
+		logger:  logger,
+		metrics: m,
+	}
+
+	// Start connection pool monitoring if metrics available
+	if m != nil {
+		go monitorConnectionPool(db, m, logger)
+	}
+
+	return wrapped, nil
+}
+
 // NewPostgreSQL creates a new PostgreSQL connection using pgxpool
 func NewPostgreSQL(ctx context.Context, cfg *config.DatabaseConfig, logger *logger.Logger, m *metrics.Metrics) (*PostgreSQL, error) {
 	// Build connection string
@@ -67,7 +101,14 @@ func NewPostgreSQL(ctx context.Context, cfg *config.DatabaseConfig, logger *logg
 	// Create pool configuration
 	poolConfig, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
-		logger.WithComponent("database").WithError(err).Error("failed to parse db pool config", "connStr", connStr)
+		// Avoid logging full connection string (may contain password/secret).
+		// Log only safe, non-sensitive fields.
+		logger.WithComponent("database").WithError(err).Error("failed to parse db pool config",
+			"host", cfg.Host,
+			"port", cfg.Port,
+			"user", cfg.User,
+			"database", cfg.Database,
+		)
 		return nil, err
 	}
 
@@ -87,6 +128,10 @@ func NewPostgreSQL(ctx context.Context, cfg *config.DatabaseConfig, logger *logg
 	// Test connection
 	if err := pool.Ping(ctx); err != nil {
 		logger.WithComponent("database").WithError(err).Error("failed to ping db")
+		if m != nil {
+			// Record connection error on startup ping
+			m.RecordDBConnectionError("ping_error")
+		}
 		pool.Close()
 		return nil, err
 	}
@@ -135,6 +180,10 @@ func NewSQLDatabase(cfg Config, m *metrics.Metrics, logger *logger.Logger) (*SQL
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
+		if m != nil {
+			// Record connection error on startup ping
+			m.RecordDBConnectionError("ping_error")
+		}
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
@@ -298,6 +347,86 @@ func monitorConnectionPool(db *sql.DB, metrics *metrics.Metrics, logger *logger.
 			"wait_duration", stats.WaitDuration.String(),
 		)
 	}
+}
+
+/*
+   Exec/Query wrappers for SQLDatabase to add automatic metrics recording.
+   These provide a convenient instrumentation layer without changing call sites
+   that use the higher-level helpers in this package. They use simple heuristics
+   to extract SQL operation and table name for labeling; avoid high-cardinality
+   labels in production by keeping this heuristic coarse.
+*/
+
+func (db *SQLDatabase) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	start := time.Now()
+	res, err := db.db.ExecContext(ctx, query, args...)
+	duration := time.Since(start).Seconds()
+
+	op, table := parseSQLOpAndTable(query)
+	if db.metrics != nil {
+		db.metrics.RecordDBQuery(op, table, duration, err)
+		if err != nil {
+			db.metrics.RecordDBConnectionError("query_error")
+		}
+	}
+	return res, err
+}
+
+func (db *SQLDatabase) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	start := time.Now()
+	rows, err := db.db.QueryContext(ctx, query, args...)
+	duration := time.Since(start).Seconds()
+
+	op, table := parseSQLOpAndTable(query)
+	if db.metrics != nil {
+		db.metrics.RecordDBQuery(op, table, duration, err)
+		if err != nil {
+			db.metrics.RecordDBConnectionError("query_error")
+		}
+	}
+	return rows, err
+}
+
+func (db *SQLDatabase) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	start := time.Now()
+	row := db.db.QueryRowContext(ctx, query, args...)
+	duration := time.Since(start).Seconds()
+
+	op, table := parseSQLOpAndTable(query)
+	if db.metrics != nil {
+		// QueryRow defers error until Scan; record that a query occurred.
+		db.metrics.RecordDBQuery(op, table, duration, nil)
+	}
+	return row
+}
+
+// parseSQLOpAndTable is a lightweight heuristic to extract SQL operation and a coarse table name.
+// It intentionally avoids deep parsing to prevent high-cardinality labels.
+func parseSQLOpAndTable(query string) (string, string) {
+	q := strings.TrimSpace(strings.ToLower(query))
+	if q == "" {
+		return "unknown", "unknown"
+	}
+	fields := strings.Fields(q)
+	op := "unknown"
+	if len(fields) > 0 {
+		op = fields[0]
+	}
+
+	table := "unknown"
+	for i, f := range fields {
+		switch f {
+		case "from", "into", "update", "delete", "join":
+			if i+1 < len(fields) {
+				// strip common delimiters
+				table = strings.Trim(fields[i+1], "\"`;")
+				// remove any trailing punctuation like comma
+				table = strings.Trim(table, ",")
+				return op, table
+			}
+		}
+	}
+	return op, table
 }
 
 // HealthCheck performs database health check (utility function)
